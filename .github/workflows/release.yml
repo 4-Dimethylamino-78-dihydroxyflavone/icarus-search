@@ -69,6 +69,15 @@ jobs:
         shell: bash
         run: cp "target/${{ matrix.target }}/release/${{ matrix.binary }}" "${{ matrix.asset }}"
 
+      - name: Smoke-test the binary
+        # Run the very file that is about to be published, against the
+        # built-in simulator: no network and no key. The Intel Mac build
+        # cannot run on the Apple Silicon runner, so it is skipped, like
+        # its tests.
+        if: matrix.target != 'x86_64-apple-darwin'
+        shell: bash
+        run: ./"${{ matrix.asset }}" --demo --probe SYD-PER
+
       - name: Upload to release
         shell: bash
         env:
