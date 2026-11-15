@@ -682,8 +682,7 @@ impl App {
         // Start already facing the remembered route; the first frame's
         // real pane size then refines the framing.
         if let Some(f) = app.route_fit() {
-            (app.view.lat0, app.view.lon0, app.view.zoom, app.view.drop) =
-                (f.lat0, f.lon0, f.zoom, f.drop);
+            (app.view.lat0, app.view.lon0, app.view.zoom) = (f.lat0, f.lon0, f.zoom);
             app.view.clamp();
         }
         app
@@ -1550,7 +1549,6 @@ impl App {
             Projection::Globe => Projection::Map,
             Projection::Map => Projection::Globe,
         };
-        (self.view.drop, self.view.shift) = (0.0, 0.0);
         self.view.clamp();
         self.spin = false;
         if self.route_fit().is_some() {
@@ -1579,22 +1577,14 @@ impl App {
             self.view.lat0 += (goal.lat0 - self.view.lat0) * ease;
             self.view.lon0 = wrap_lon(self.view.lon0 + dlon * ease);
             self.view.zoom += (goal.zoom - self.view.zoom) * ease;
-            self.view.drop += (goal.drop - self.view.drop) * ease;
-            // Auto-framing always re-centres the planet sideways.
-            self.view.shift -= self.view.shift * ease;
+            // The glide turns and resizes the planet. Where it sits in the
+            // pane is the user's choice and is left alone.
             let arrived = (goal.lat0 - self.view.lat0).abs() < 0.05
                 && dlon.abs() < 0.05
-                && (goal.zoom - self.view.zoom).abs() < 0.005
-                && (goal.drop - self.view.drop).abs() < 0.005
-                && self.view.shift.abs() < 0.005;
+                && (goal.zoom - self.view.zoom).abs() < 0.005;
             if arrived {
-                (
-                    self.view.lat0,
-                    self.view.lon0,
-                    self.view.zoom,
-                    self.view.drop,
-                    self.view.shift,
-                ) = (goal.lat0, goal.lon0, goal.zoom, goal.drop, 0.0);
+                (self.view.lat0, self.view.lon0, self.view.zoom) =
+                    (goal.lat0, goal.lon0, goal.zoom);
                 self.goal = None;
             }
             self.view.clamp();
@@ -1852,7 +1842,9 @@ impl App {
                     Pane::Form => self.form_key(code),
                     Pane::Radar => self.radar_key(code),
                     Pane::Tracks => self.tracks_key(code),
-                    Pane::Globe => self.globe_key(code),
+                    Pane::Globe => {
+                        self.globe_key(code, key.modifiers.contains(KeyModifiers::SHIFT))
+                    }
                 }
             }
         }
@@ -2081,7 +2073,8 @@ impl App {
         }
     }
 
-    fn globe_key(&mut self, code: KeyCode) {
+    /// Arrow keys turn the globe; with Shift they move the planet itself.
+    fn globe_key(&mut self, code: KeyCode, shift: bool) {
         let (w, h) = self.globe_dots();
         let step = w.min(h).max(8.0) / 10.0;
         let (dx, dy) = match code {
@@ -2091,8 +2084,15 @@ impl App {
             KeyCode::Down => (0.0, -step),
             _ => return,
         };
-        self.release_view();
-        self.view.pan(dx, dy, w.max(8.0), h.max(8.0));
+        let (w, h) = (w.max(8.0), h.max(8.0));
+        if shift && self.view.proj == Projection::Globe {
+            // Turning drags the surface, so Left brings the east into view.
+            // Moving carries the planet the way the arrow points.
+            self.view.slide(-dx, -dy, w, h);
+        } else {
+            self.release_view();
+            self.view.pan(dx, dy, w, h);
+        }
     }
 
     // ------------------------------------------------------------------ intel
@@ -2504,8 +2504,21 @@ impl App {
                         drag.moved = true;
                         drag.last = (event.column, event.row);
                         let (w, h) = self.globe_dots();
-                        self.framed = false;
-                        self.view.pan(dx * 2.0, dy * 4.0, w, h);
+                        // A cell is two dots wide and four tall.
+                        let (dx, dy) = (dx * 2.0, dy * 4.0);
+                        // Held with Shift, the drag moves the planet across
+                        // the pane; without, it turns it. Ctrl does the same
+                        // as Shift, because many terminals keep Shift+drag
+                        // for selecting text and never pass it on.
+                        let moving = event
+                            .modifiers
+                            .intersects(KeyModifiers::SHIFT | KeyModifiers::CONTROL);
+                        if moving && self.view.proj == Projection::Globe {
+                            self.view.slide(dx, dy, w, h);
+                        } else {
+                            self.framed = false;
+                            self.view.pan(dx, dy, w, h);
+                        }
                     }
                 }
             }
@@ -2757,6 +2770,15 @@ impl App {
                 "down" => press(self, KeyCode::Down),
                 "left" => press(self, KeyCode::Left),
                 "right" => press(self, KeyCode::Right),
+                "shift+up" | "shift+down" | "shift+left" | "shift+right" => {
+                    let code = match token {
+                        "shift+up" => KeyCode::Up,
+                        "shift+down" => KeyCode::Down,
+                        "shift+left" => KeyCode::Left,
+                        _ => KeyCode::Right,
+                    };
+                    self.on_key(KeyEvent::new(code, KeyModifiers::SHIFT));
+                }
                 "space" => press(self, KeyCode::Char(' ')),
                 "bksp" => press(self, KeyCode::Backspace),
                 "pgup" => press(self, KeyCode::PageUp),

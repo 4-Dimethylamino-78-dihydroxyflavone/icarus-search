@@ -482,6 +482,147 @@ mod tests {
         assert_eq!(app.view.lon0, lon);
     }
 
+    /// Where the planet's centre is drawn, in dots of the globe's canvas.
+    fn planet(app: &App) -> (f64, f64) {
+        let inner = app.hit.globe_inner;
+        app.view
+            .globe_centre(f64::from(inner.width) * 2.0, f64::from(inner.height) * 4.0)
+    }
+
+    fn near(a: (f64, f64), b: (f64, f64)) -> bool {
+        (a.0 - b.0).abs() < 1e-6 && (a.1 - b.1).abs() < 1e-6
+    }
+
+    /// A left-button drag across the globe with a modifier key held.
+    fn drag_with(app: &mut App, held: KeyModifiers, from: (u16, u16), to: (u16, u16)) {
+        let mut send = |kind, (column, row): (u16, u16)| {
+            app.on_mouse(MouseEvent {
+                kind,
+                column,
+                row,
+                modifiers: held,
+            });
+        };
+        send(MouseEventKind::Down(MouseButton::Left), from);
+        send(MouseEventKind::Drag(MouseButton::Left), to);
+        send(MouseEventKind::Up(MouseButton::Left), to);
+    }
+
+    #[test]
+    fn the_globe_stays_in_the_middle_of_its_pane_through_framing_zooming_and_turning() {
+        for script in [
+            "",
+            "from:LHR to:NRT s wait",
+            "from:LHR to:CDG",
+            "from:SYD to:PER s wait",
+        ] {
+            let mut app = rendered(120, 30, script);
+            let inner = app.hit.globe_inner;
+            let middle = (f64::from(inner.width), f64::from(inner.height) * 2.0);
+            assert_eq!(planet(&app), middle, "{script:?}: as first framed");
+
+            // The wheel, over the planet and then over empty space.
+            let over_planet = Position::new(inner.x + inner.width / 2 + 4, inner.y + 3);
+            let over_space = Position::new(inner.x + 1, inner.y + 1);
+            for pos in [over_planet, over_space] {
+                app.on_scroll(pos, -2);
+                app.on_scroll(pos, 1);
+            }
+            assert_eq!(planet(&app), middle, "{script:?}: after zooming");
+
+            // Turned by hand, then framed afresh.
+            let from = (inner.x + 20, inner.y + 5);
+            drag_with(&mut app, KeyModifiers::NONE, from, (from.0 + 6, from.1 + 2));
+            assert_eq!(planet(&app), middle, "{script:?}: after a drag");
+            app.feed("c");
+            app.feed("wait");
+            assert_eq!(planet(&app), middle, "{script:?}: after framing again");
+        }
+    }
+
+    #[test]
+    fn shift_drag_moves_the_globe_and_it_stays_where_it_is_put() {
+        // Ctrl works too: many terminals keep Shift+drag for selecting text.
+        for held in [KeyModifiers::SHIFT, KeyModifiers::CONTROL] {
+            let mut app = rendered(120, 30, "from:LHR to:NRT s wait");
+            let inner = app.hit.globe_inner;
+            let from = (inner.x + inner.width / 2, inner.y + inner.height / 2);
+            let start = planet(&app);
+            let facing = (app.view.lat0, app.view.lon0, app.view.zoom);
+
+            drag_with(&mut app, held, from, (from.0 + 7, from.1 + 3));
+            // Seven cells right and three down; a cell is 2 by 4 dots.
+            let moved = planet(&app);
+            assert!(
+                near(moved, (start.0 + 14.0, start.1 + 12.0)),
+                "{held:?}: {start:?} -> {moved:?}"
+            );
+            assert_eq!(
+                (app.view.lat0, app.view.lon0, app.view.zoom),
+                facing,
+                "{held:?}: moving the globe does not turn or resize it"
+            );
+            assert_eq!(
+                app.form.dest.map(|a| a.iata),
+                Some("NRT"),
+                "a drag is not a click"
+            );
+
+            // Zooming and framing a route leave it there, and the route is
+            // found in the pane all the same.
+            app.on_scroll(Position::new(from.0, from.1), -1);
+            app.feed("c");
+            app.feed("wait");
+            assert!(near(planet(&app), moved), "{held:?}: {:?}", planet(&app));
+            redraw(&mut app, 120, 30);
+            for iata in ["LHR", "NRT"] {
+                let (x, y) = cell_of(&app, iata);
+                assert!(
+                    inner.contains(Position::new(x, y)),
+                    "{held:?}: {iata} is drawn at ({x}, {y}), outside {inner:?}"
+                );
+            }
+
+            // 0 puts it back.
+            app.feed("0");
+            assert!(near(planet(&app), start));
+        }
+    }
+
+    #[test]
+    fn shift_with_the_arrows_moves_the_globe_and_bare_arrows_turn_it() {
+        let mut app = rendered(120, 30, "from:LHR to:NRT s wait");
+        while app.focus != Pane::Globe {
+            app.feed("tab");
+        }
+        let (start, lon) = (planet(&app), app.view.lon0);
+        app.feed("shift+right");
+        app.feed("shift+down");
+        let moved = planet(&app);
+        assert!(
+            moved.0 > start.0 && moved.1 > start.1,
+            "{start:?} -> {moved:?}"
+        );
+        assert_eq!(app.view.lon0, lon, "moving is not turning");
+        app.feed("right");
+        assert_ne!(app.view.lon0, lon, "a bare arrow still turns it");
+        assert!(near(planet(&app), moved), "turning is not moving");
+        // Nothing else was touched along the way.
+        assert_eq!(app.cfg.theme, Config::default().theme);
+        assert!(app.intel.is_none() && app.popup.is_none() && !app.globe_full);
+    }
+
+    #[test]
+    fn on_the_flat_map_a_shift_drag_is_an_ordinary_drag() {
+        let mut app = rendered(120, 30, "from:LHR to:NRT s wait g wait");
+        let inner = app.hit.globe_inner;
+        let from = (inner.x + inner.width / 2, inner.y + inner.height / 2);
+        let lon = app.view.lon0;
+        drag_with(&mut app, KeyModifiers::SHIFT, from, (from.0 + 7, from.1));
+        assert_ne!(app.view.lon0, lon, "the map scrolled");
+        assert_eq!((app.view.drop, app.view.shift), (0.0, 0.0));
+    }
+
     #[test]
     fn clicking_outside_a_popup_dismisses_it_and_inside_does_not() {
         let mut app = rendered(120, 30, "?");

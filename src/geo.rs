@@ -157,21 +157,25 @@ pub struct View {
     pub zoom: f64,
     pub proj: Projection,
     /// Globe only: how far the planet's centre sits below the middle of the
-    /// canvas, in planet radii. Sinking a large globe leaves its upper limb
-    /// across the pane as a horizon for flight paths to arc over.
+    /// canvas, as a fraction of the canvas's shorter side. Zero is centred.
+    ///
+    /// Where the planet sits is the user's to choose and nothing else's:
+    /// only [`View::slide`] changes it. Zooming and framing a route turn
+    /// the planet and resize it, and leave it where it is. The unit is a
+    /// share of the pane, not of the planet, precisely so that the zoom can
+    /// change without the planet moving.
     pub drop: f64,
     /// Globe only: the same, sideways (positive moves the planet right).
-    /// Wheel-zooming toward the pointer slides the planet as it grows.
     pub shift: f64,
 }
 
-/// A camera position that frames a route: see [`View::fit`].
+/// A camera position that frames a route: see [`View::fit`]. It says which
+/// way the planet faces and how large it is, never where it sits.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Framing {
     pub lat0: f64,
     pub lon0: f64,
     pub zoom: f64,
-    pub drop: f64,
 }
 
 /// A view's rotation with its trigonometry already done. Drawing a frame
@@ -235,13 +239,26 @@ impl View {
         0.46 * w.min(h) * self.zoom
     }
 
+    /// How much of the planet may leave the pane, in radii past the edge.
+    /// The rest stays in sight, so a planet moved aside can always be
+    /// found and dragged back, whatever the zoom or the window size.
+    const OUT_OF_SIGHT: f64 = 0.6;
+
+    /// Where the planet's centre is on a `w` x `h` canvas (globe only).
+    pub fn globe_centre(&self, w: f64, h: f64) -> (f64, f64) {
+        let side = w.min(h);
+        let reach = Self::OUT_OF_SIGHT * self.globe_radius(w, h);
+        (
+            (w / 2.0 + self.shift * side).clamp(-reach, w + reach),
+            (h / 2.0 + self.drop * side).clamp(-reach, h + reach),
+        )
+    }
+
     /// Camera-space point to canvas coordinates (globe projection).
     pub fn canvas_point(&self, c: V3, w: f64, h: f64) -> (f64, f64) {
         let r = self.globe_radius(w, h);
-        (
-            w / 2.0 + (self.shift + c[0]) * r,
-            h / 2.0 + (self.drop - c[1]) * r,
-        )
+        let (cx, cy) = self.globe_centre(w, h);
+        (cx + c[0] * r, cy - c[1] * r)
     }
 
     /// Canvas units per degree (x, y) in map mode.
@@ -282,15 +299,13 @@ impl View {
         match self.proj {
             Projection::Globe => {
                 let r = self.globe_radius(w, h);
-                let (cx, cy) = (
-                    (x - w / 2.0) / r - self.shift,
-                    (h / 2.0 - y) / r + self.drop,
-                );
-                let rho2 = cx * cx + cy * cy;
+                let (cx, cy) = self.globe_centre(w, h);
+                let (px, py) = ((x - cx) / r, (cy - y) / r);
+                let rho2 = px * px + py * py;
                 if rho2 > 1.0 {
                     return None; // clicked on space, not the planet
                 }
-                let world = self.camera().invert([cx, cy, (1.0 - rho2).sqrt()]);
+                let world = self.camera().invert([px, py, (1.0 - rho2).sqrt()]);
                 Some(LatLon::from_vec(world))
             }
             Projection::Map => {
@@ -321,6 +336,66 @@ impl View {
         self.clamp();
     }
 
+    /// Move the planet itself across the pane by a canvas-space delta,
+    /// without turning it. On the flat map, which fills its pane, this is
+    /// the same as dragging the surface.
+    pub fn slide(&mut self, dx: f64, dy: f64, w: f64, h: f64) {
+        if self.proj != Projection::Globe {
+            return self.pan(dx, dy, w, h);
+        }
+        let side = w.min(h).max(1.0);
+        let place = |view: &mut Self, cx: f64, cy: f64| {
+            view.shift = (cx - w / 2.0) / side;
+            view.drop = (cy - h / 2.0) / side;
+        };
+        // Start from where the planet is drawn, and store where it ends up
+        // being drawn, so that a planet stopped at the edge of the pane
+        // answers the very next movement back the other way.
+        let (cx, cy) = self.globe_centre(w, h);
+        place(self, cx + dx, cy + dy);
+        let (cx, cy) = self.globe_centre(w, h);
+        place(self, cx, cy);
+    }
+
+    /// How close to the planet's edge [`View::aim`] will put a place, in
+    /// radii. At the very edge the surface is seen side-on, and a nudge of
+    /// the pointer would spin the planet a long way.
+    const AIM_LIMIT: f64 = 0.92;
+
+    /// Globe only: turn the planet so that the place `p` (a unit vector)
+    /// is drawn at canvas point `(x, y)`. The planet stays where it is and
+    /// keeps its size; only the way it faces changes.
+    ///
+    /// The camera turns two ways, round the poles and over them, and never
+    /// rolls. That is enough to put any place at any point of the disc
+    /// except where a place near a pole would have to be carried far out
+    /// sideways; then it goes as far as it can.
+    pub fn aim(&mut self, p: V3, x: f64, y: f64, w: f64, h: f64) {
+        let r = self.globe_radius(w, h);
+        let (cx, cy) = self.globe_centre(w, h);
+        // Where `p` is wanted, in planet radii from the planet's centre.
+        let (mut tx, mut ty) = ((x - cx) / r, (cy - y) / r);
+        let rho = tx.hypot(ty);
+        if rho > Self::AIM_LIMIT {
+            (tx, ty) = (tx * Self::AIM_LIMIT / rho, ty * Self::AIM_LIMIT / rho);
+        }
+        // Turning round the poles carries `p` along its circle of latitude,
+        // whose radius seen from above is `ring`. Choose the turn that
+        // leaves it `tx` to the side, on the near half of the circle.
+        let ring = p[0].hypot(p[2]);
+        let tx = tx.clamp(-ring, ring);
+        let depth = (ring * ring - tx * tx).max(0.0).sqrt();
+        let lon = depth.atan2(tx) - p[2].atan2(p[0]);
+        // Tipping the planet then swings `p` up or down a circle of radius
+        // `swing` until it is `ty` high, again on the near side.
+        let swing = p[1].hypot(depth);
+        let ty = ty.clamp(-swing, swing);
+        let near = (swing * swing - ty * ty).max(0.0).sqrt();
+        let lat = near.atan2(ty) - depth.atan2(p[1]);
+        self.lon0 = wrap_lon(lon.to_degrees());
+        self.lat0 = lat.to_degrees().clamp(-89.0, 89.0);
+    }
+
     pub fn zoom_by(&mut self, factor: f64) {
         self.zoom = (self.zoom * factor).clamp(self.min_zoom(), Self::MAX_ZOOM);
         self.clamp();
@@ -331,18 +406,14 @@ impl View {
     pub fn zoom_about(&mut self, factor: f64, x: f64, y: f64, w: f64, h: f64) {
         match self.proj {
             Projection::Globe => {
-                // Position of the anchor in planet radii from the planet's
-                // centre. Scaling leaves that unchanged; solve for the
-                // offsets that put it back under (x, y) at the new radius.
-                let r = self.globe_radius(w, h);
-                let (ax, ay) = (
-                    (x - w / 2.0) / r - self.shift,
-                    self.drop - (y - h / 2.0) / r,
-                );
+                // The planet grows where it stands, then turns to bring the
+                // place that was under (x, y) back under it. Over empty
+                // space there is nothing to hold on to: it only grows.
+                let anchor = self.unproject(x, y, w, h);
                 self.zoom_by(factor);
-                let r = self.globe_radius(w, h);
-                self.shift = (x - w / 2.0) / r - ax;
-                self.drop = ay + (y - h / 2.0) / r;
+                if let Some(place) = anchor {
+                    self.aim(place.to_vec(), x, y, w, h);
+                }
             }
             Projection::Map => {
                 // The flat map is linear, so a pan corrects exactly.
@@ -365,16 +436,46 @@ impl View {
             self.lat0 = self.lat0.clamp(-limit, limit);
         } else {
             self.lat0 = self.lat0.clamp(-89.0, 89.0);
-            // Never let the planet slide entirely out of the pane.
-            self.drop = self.drop.clamp(-1.5, 1.5);
-            self.shift = self.shift.clamp(-1.5, 1.5);
+            // Only a bound on what is stored. What keeps the planet in
+            // sight is `globe_centre`, which knows the size of the pane.
+            self.drop = self.drop.clamp(-8.0, 8.0);
+            self.shift = self.shift.clamp(-8.0, 8.0);
         }
     }
 
-    /// Degrees the camera sits south of a route it frames. Looking straight
-    /// down on a route hides its loft (the arc rises toward the viewer);
-    /// looking from the south lets it arc visibly over the planet's curve.
+    /// The most a framed route may sit off the middle of the planet, in
+    /// degrees. A planet in the middle of its pane is simply turned to
+    /// face the route. One the user has moved aside shows its route
+    /// toward the middle of the pane instead, seen at a slant, and past
+    /// this angle the far end starts to slip round the edge.
     const TILT: f64 = 34.0;
+
+    /// Clear space kept between a framed route and the sides of the pane,
+    /// and its top and bottom (where the readouts are), as shares of it.
+    const MARGIN: (f64, f64) = (0.07, 0.12);
+
+    /// Whether `p` is drawn on the near side and inside the pane's margins.
+    fn shows(&self, p: V3, w: f64, h: f64) -> bool {
+        let (x, y, side) = self.project(p, w, h);
+        let (mx, my) = (Self::MARGIN.0 * w, Self::MARGIN.1 * h);
+        side != Side::Hidden && (mx..=w - mx).contains(&x) && (my..=h - my).contains(&y)
+    }
+
+    /// Globe only: the canvas point a framed route's middle is put at. It
+    /// is the middle of the pane, unless the planet has been moved so far
+    /// that this would be more than `slant` (a sine) from its own middle.
+    fn focus(&self, slant: f64, w: f64, h: f64) -> (f64, f64) {
+        let r = self.globe_radius(w, h);
+        let (cx, cy) = self.globe_centre(w, h);
+        let (dx, dy) = (w / 2.0 - cx, h / 2.0 - cy);
+        let far = dx.hypot(dy);
+        let pull = if far > slant * r {
+            slant * r / far
+        } else {
+            1.0
+        };
+        (cx + dx * pull, cy + dy * pull)
+    }
 
     /// Camera position that frames `legs` (flight paths) and any lone
     /// `points`, on a canvas of `w` x `h` dots.
@@ -427,7 +528,6 @@ impl View {
                     lat0: centre.lat,
                     lon0: centre.lon,
                     zoom,
-                    drop: 0.0,
                 })
             }
             Projection::Globe if targets.len() == 1 => {
@@ -436,45 +536,44 @@ impl View {
                     lat0: centre.lat.clamp(-60.0, 60.0),
                     lon0: centre.lon,
                     zoom: 1.0,
-                    drop: 0.0,
                 })
             }
             Projection::Globe => {
-                // Very long routes wrap so far round the planet that a full
-                // tilt would push their ends over the horizon; ease it off so
-                // every point stays within 80 degrees of the camera.
+                // The planet stays where it is. Turn it so the middle of
+                // the route is at the middle of the pane, then find the
+                // largest size at which every part of the route is still
+                // in the pane and on the near side.
+                //
+                // Very long routes wrap so far round the planet that a
+                // slanted view would push their ends over the horizon;
+                // keep every point within 80 degrees of the camera.
                 let spread = unit.iter().map(|p| angle(middle, *p)).fold(0.0, f64::max);
-                let tilt = Self::TILT.min(80.0 - spread.to_degrees()).max(0.0);
-                let lat0 = (centre.lat - tilt).clamp(-89.0, 89.0);
-                let camera = View {
-                    lat0,
-                    lon0: centre.lon,
-                    zoom: 1.0,
-                    proj: Projection::Globe,
-                    drop: 0.0,
-                    shift: 0.0,
-                }
-                .camera();
-                // Where the route lands on screen, in planet radii.
-                let (mut reach, mut low, mut high) = (0.05f64, f64::INFINITY, f64::NEG_INFINITY);
-                for p in &targets {
-                    let c = camera.apply(*p);
-                    reach = reach.max(c[0].abs());
-                    low = low.min(c[1]);
-                    high = high.max(c[1]);
-                }
-                // Grow the planet until the route spans the pane.
-                let radius = (0.43 * w / reach).min(0.60 * h / (high - low).max(0.25));
-                let zoom = (radius / (0.46 * w.min(h))).clamp(1.0, 9.0);
-                let radius = 0.46 * w.min(h) * zoom;
-                // Then sink it so the top of the route sits just under the
-                // top edge - but never lift the planet above centre.
-                let drop = ((0.2 * h - h / 2.0) / radius + high).max(0.0);
+                let slant = Self::TILT
+                    .min(80.0 - spread.to_degrees())
+                    .max(0.0)
+                    .to_radians()
+                    .sin();
+                let framed = |zoom: f64| {
+                    let mut trial = View { zoom, ..*self };
+                    let (x, y) = trial.focus(slant, w, h);
+                    trial.aim(middle, x, y, w, h);
+                    trial
+                };
+                // Sizes from 9x down to 1x in even steps of about 5%. Trying
+                // each in turn is a few thousand multiplications, once per
+                // route, and unlike a formula it stays right when the
+                // planet has been moved off-centre.
+                const STEPS: i32 = 44;
+                let chosen = (0..=STEPS)
+                    .map(|i| framed(9f64.powf(1.0 - f64::from(i) / f64::from(STEPS))))
+                    .find(|trial| targets.iter().all(|p| trial.shows(*p, w, h)))
+                    // Nothing fits (a route right round the world, or a
+                    // planet moved mostly out of the pane): show it whole.
+                    .unwrap_or_else(|| framed(1.0));
                 Some(Framing {
-                    lat0,
-                    lon0: centre.lon,
-                    zoom,
-                    drop,
+                    lat0: chosen.lat0,
+                    lon0: chosen.lon0,
+                    zoom: chosen.zoom,
                 })
             }
         }
@@ -629,14 +728,16 @@ mod tests {
                     let f = base
                         .fit(&legs, &[], w, h)
                         .expect("a route can always be framed");
+                    // Framing turns and sizes the planet; it stays put.
                     let view = View {
                         lat0: f.lat0,
                         lon0: f.lon0,
                         zoom: f.zoom,
-                        proj,
-                        drop: f.drop,
-                        shift: 0.0,
+                        ..base
                     };
+                    if proj == Projection::Globe {
+                        assert_eq!(view.globe_centre(w, h), (w / 2.0, h / 2.0));
+                    }
                     for (from, to) in &legs {
                         for i in 0..=20 {
                             let p = arc_point(
@@ -675,9 +776,10 @@ mod tests {
                 shift: 0.0,
             };
             let (w, h) = (164.0, 52.0);
-            // Anchor well away from the centre, where a rotation-based
+            // Anchor well away from the centre, where an approximate
             // correction used to drift by several cells.
             let (x, y, _) = view.project(LHR.to_vec(), w, h);
+            let planet = view.globe_centre(w, h);
             for factor in [1.2, 1.2, 1.2, 0.7] {
                 view.zoom_about(factor, x, y, w, h);
                 let (nx, ny, _) = view.project(LHR.to_vec(), w, h);
@@ -685,6 +787,153 @@ mod tests {
                     (nx - x).abs() < 1e-6 && (ny - y).abs() < 1e-6,
                     "{proj:?}: moved to ({nx:.2}, {ny:.2})"
                 );
+                // On the globe the place is held by turning the planet,
+                // never by moving it.
+                assert_eq!(view.globe_centre(w, h), planet, "{proj:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn aiming_puts_a_place_at_a_point_without_moving_the_planet() {
+        let (w, h) = (164.0, 52.0);
+        for (drop, shift) in [(0.0, 0.0), (0.4, -0.5)] {
+            for zoom in [0.8, 1.0, 3.5, 9.0] {
+                let mut view = View {
+                    lat0: -10.0,
+                    lon0: 30.0,
+                    zoom,
+                    proj: Projection::Globe,
+                    drop,
+                    shift,
+                };
+                let planet = view.globe_centre(w, h);
+                let r = view.globe_radius(w, h);
+                // Points across the disc, by direction and by distance out.
+                for place in [LHR, NRT, JFK, LatLon::new(-33.9, 151.2)] {
+                    for (ux, uy) in [(0.0, 0.0), (0.5, 0.2), (-0.3, -0.4), (0.1, 0.7)] {
+                        let (x, y) = (planet.0 + ux * r, planet.1 - uy * r);
+                        view.aim(place.to_vec(), x, y, w, h);
+                        let (nx, ny, side) = view.project(place.to_vec(), w, h);
+                        assert_eq!(side, Side::Front);
+                        assert!(
+                            (nx - x).abs() < 1e-6 && (ny - y).abs() < 1e-6,
+                            "{place:?} wanted at ({x:.2}, {y:.2}), drawn at ({nx:.2}, {ny:.2})"
+                        );
+                        assert_eq!(view.globe_centre(w, h), planet);
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn aiming_past_the_edge_of_the_planet_stops_just_inside_it() {
+        let (w, h) = (164.0, 52.0);
+        let mut view = View {
+            lat0: 0.0,
+            lon0: 0.0,
+            zoom: 1.0,
+            proj: Projection::Globe,
+            drop: 0.0,
+            shift: 0.0,
+        };
+        // Far out in space to the right of the planet.
+        view.aim(LatLon::new(0.0, 100.0).to_vec(), w, h / 2.0, w, h);
+        let (x, y, side) = view.project(LatLon::new(0.0, 100.0).to_vec(), w, h);
+        let r = view.globe_radius(w, h);
+        assert_eq!(side, Side::Front);
+        assert!((y - h / 2.0).abs() < 1e-6);
+        assert!(
+            ((x - w / 2.0) / r - 0.92).abs() < 1e-6,
+            "at {:.3} radii",
+            (x - w / 2.0) / r
+        );
+    }
+
+    #[test]
+    fn sliding_moves_the_planet_without_turning_it_and_never_loses_it() {
+        let (w, h) = (164.0, 52.0);
+        let mut view = View {
+            lat0: 12.0,
+            lon0: -40.0,
+            zoom: 2.0,
+            proj: Projection::Globe,
+            drop: 0.0,
+            shift: 0.0,
+        };
+        assert_eq!(view.globe_centre(w, h), (82.0, 26.0), "centred to begin");
+        view.slide(10.0, -6.0, w, h);
+        let (cx, cy) = view.globe_centre(w, h);
+        assert!((cx - 92.0).abs() < 1e-9 && (cy - 20.0).abs() < 1e-9);
+        assert_eq!((view.lat0, view.lon0, view.zoom), (12.0, -40.0, 2.0));
+
+        // Zooming does not move it either.
+        view.zoom_by(3.0);
+        let (zx, zy) = view.globe_centre(w, h);
+        assert!((zx - 92.0).abs() < 1e-9 && (zy - 20.0).abs() < 1e-9);
+
+        // Flung far away it stops with part of itself still in the pane...
+        view.slide(1e6, 1e6, w, h);
+        let visible = |view: &View| {
+            let (cx, cy) = view.globe_centre(w, h);
+            let r = view.globe_radius(w, h);
+            cx - r < w && cx + r > 0.0 && cy - r < h && cy + r > 0.0
+        };
+        assert!(visible(&view));
+        // ...and the first movement back is not swallowed by the overshoot.
+        let (before, _) = view.globe_centre(w, h);
+        view.slide(-5.0, 0.0, w, h);
+        let (after, _) = view.globe_centre(w, h);
+        assert!((before - after - 5.0).abs() < 1e-9, "{before} -> {after}");
+        // A planet at the edge is still in sight after shrinking.
+        view.slide(1e6, 1e6, w, h);
+        view.zoom_by(0.01);
+        assert!(visible(&view));
+    }
+
+    #[test]
+    fn framing_finds_the_route_wherever_the_planet_has_been_put() {
+        let (w, h) = (164.0, 52.0);
+        for (drop, shift) in [(0.0, 0.0), (0.45, 0.0), (0.3, -0.6), (-0.2, 0.5)] {
+            for (a, b) in [
+                (LHR, NRT),
+                (LHR, LatLon::new(49.0, 2.55)),
+                (LatLon::new(-33.9, 151.2), LatLon::new(-31.9, 115.9)),
+            ] {
+                let base = View {
+                    lat0: 0.0,
+                    lon0: 0.0,
+                    zoom: 1.0,
+                    proj: Projection::Globe,
+                    drop,
+                    shift,
+                };
+                let legs = [(a.to_vec(), b.to_vec())];
+                let f = base.fit(&legs, &[], w, h).expect("framed");
+                let view = View {
+                    lat0: f.lat0,
+                    lon0: f.lon0,
+                    zoom: f.zoom,
+                    ..base
+                };
+                assert_eq!(
+                    view.globe_centre(w, h),
+                    base.globe_centre(w, h),
+                    "framing left the planet where it was"
+                );
+                for i in 0..=20 {
+                    let p = arc_point(legs[0].0, legs[0].1, f64::from(i) / 20.0, true);
+                    let (x, y, side) = view.project(p, w, h);
+                    assert!(
+                        side != Side::Hidden && (0.0..w).contains(&x) && (0.0..h).contains(&y),
+                        "planet at ({drop}, {shift}), {a:?}>{b:?}, t={i}: ({x:.1}, {y:.1}) {side:?}"
+                    );
+                }
+                // A short hop is still magnified, not left as a speck.
+                if angle(a.to_vec(), b.to_vec()) < 0.2 {
+                    assert!(f.zoom > 4.0, "zoom {} for a short hop", f.zoom);
+                }
             }
         }
     }

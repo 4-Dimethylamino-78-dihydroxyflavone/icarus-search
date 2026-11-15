@@ -824,7 +824,7 @@ fn guide(f: &mut Frame, area: Rect, app: &App) -> Regions {
 
 fn help(f: &mut Frame, area: Rect, app: &App) -> Regions {
     let th = app.theme;
-    let (outer, inner) = open(f, area, app, "FIELD MANUAL", 92, 34);
+    let (outer, inner) = open(f, area, app, "FIELD MANUAL", 92, 35);
     let head = |text: &str| {
         Line::from(Span::styled(
             format!(" {text}"),
@@ -881,6 +881,10 @@ fn help(f: &mut Frame, area: Rect, app: &App) -> Regions {
         key("CLICK", "SET DESTINATION (FIRST CLICK SETS ORIGIN)"),
         key("RIGHT-CLICK", "SET ORIGIN"),
         key("DRAG / WHEEL", "ROTATE / ZOOM TOWARDS THE POINTER"),
+        key(
+            "SHIFT+DRAG",
+            "MOVE THE GLOBE (ALSO CTRL+DRAG, SHIFT+ARROWS).  0 PUTS IT BACK",
+        ),
         key(
             "G  F  C",
             "GLOBE OR FLAT MAP / FULLSCREEN / CENTRE ON ROUTE",

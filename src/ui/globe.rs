@@ -497,20 +497,19 @@ fn land(cv: &mut DotCanvas, view: &View, th: Theme, tinted: bool) {
     let (w, h) = (cv.width(), cv.height());
     let camera = view.camera();
     let radius = view.globe_radius(w, h);
+    let (cx, cy) = view.globe_centre(w, h);
     let land_at = |x: f64, y: f64| -> Option<LatLon> {
         let p = match view.proj {
-            // Same maths as `View::unproject`, with the rotation hoisted out.
+            // Same maths as `View::unproject`, with the rotation and the
+            // planet's position hoisted out.
             Projection::Globe => {
-                let (cx, cy) = (
-                    (x - w / 2.0) / radius - view.shift,
-                    (h / 2.0 - y) / radius + view.drop,
-                );
-                let rho2 = cx * cx + cy * cy;
+                let (px, py) = ((x - cx) / radius, (cy - y) / radius);
+                let rho2 = px * px + py * py;
                 if rho2 > 1.0 {
                     return None;
                 }
                 // A rotation keeps a unit vector a unit vector.
-                LatLon::from_unit_vec_fast(camera.invert([cx, cy, (1.0 - rho2).sqrt()]))
+                LatLon::from_unit_vec_fast(camera.invert([px, py, (1.0 - rho2).sqrt()]))
             }
             Projection::Map => view.unproject(x, y, w, h)?,
         };

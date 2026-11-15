@@ -129,6 +129,12 @@ Click the currency or `F2 SETTINGS` in the top bar to open them. On the globe, c
 airport to set the destination, right-click to set the origin, drag to
 rotate, and scroll to zoom toward the pointer.
 
+The globe sits in the middle of its pane and stays there: choosing a route
+or zooming turns it and resizes it, never moves it. To move it yourself,
+hold `Shift` and drag (or `Ctrl` and drag: some terminals keep Shift+drag
+for selecting text), or press `Shift` with the arrow keys while the globe
+has the focus. It stays where you put it; `0` puts it back in the middle.
+
 **Colours.** A trip runs from cyan (where you start) to pink (where you
 are going), one step of colour per flight. The map, the form and the
 itinerary all use the same colours, so a stop can be matched across them at
