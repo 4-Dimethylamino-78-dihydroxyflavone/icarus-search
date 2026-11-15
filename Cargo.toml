@@ -1,0 +1,40 @@
+[package]
+name = "icarus-search"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.86"
+description = "A retro command-terminal for hunting cheap flights across a spinning globe"
+license = "MIT"
+readme = "README.md"
+keywords = ["flights", "tui", "ratatui", "travel", "globe"]
+categories = ["command-line-utilities"]
+
+[dependencies]
+ratatui = "0.30"
+ureq = "3"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+chrono = { version = "0.4", default-features = false, features = ["std", "clock", "serde"] }
+directories = "6"
+open = "5"
+toml = "1"
+anyhow = "1"
+
+# Only to ask the classic Windows console which font it is using, to lend
+# it one with braille for the map, and to read the clipboard for Ctrl+V,
+# which that console does not turn into a paste (see src/console.rs).
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Gdi",
+    "Win32_System_Console",
+    "Win32_System_DataExchange",
+    "Win32_System_Memory",
+    "Win32_UI_WindowsAndMessaging",
+] }
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+strip = true

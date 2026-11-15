@@ -1,0 +1,12 @@
+/target
+
+# Never commit a key. Keys belong in the app (F2), in the
+# ICARUS_API_KEY / ICARUS_BAKED_KEY environment variables, or in a
+# repository secret.
+.env
+.env.*
+*.key
+config.toml
+# The settings file the app writes beside itself; it can hold a key.
+icarus-search.toml
+icarus-search.toml.bad

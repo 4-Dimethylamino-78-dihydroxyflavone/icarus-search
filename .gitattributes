@@ -1,0 +1,3 @@
+# The map data is compiled into the program byte for byte (include_bytes!),
+# so git must never translate line endings inside it.
+*.bin binary

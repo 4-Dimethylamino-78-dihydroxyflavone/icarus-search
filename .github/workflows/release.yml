@@ -1,0 +1,80 @@
+# Build the four downloadable binaries and attach them to a GitHub release.
+# Triggered by pushing a version tag:  git tag v0.1.0 && git push origin v0.1.0
+#
+# Uses only GitHub's own actions and the tools preinstalled on its runners
+# (rustup, gh), so no third-party action ever sees the baked key.
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+  # Optional. If this repository secret exists, the key is compiled into the
+  # binaries so they work with no setup. Release binaries of a public repo
+  # are public, and a compiled-in key can be extracted: free-tier keys only.
+  ICARUS_BAKED_KEY: ${{ secrets.ICARUS_BAKED_KEY }}
+
+jobs:
+  build:
+    name: ${{ matrix.asset }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            binary: icarus-search.exe
+            asset: icarus-search-windows-x64.exe
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            binary: icarus-search
+            asset: icarus-search-macos-arm64
+          - os: macos-latest
+            target: x86_64-apple-darwin
+            binary: icarus-search
+            asset: icarus-search-macos-intel
+          - os: ubuntu-latest
+            # musl: one static file that runs on any Linux distribution.
+            target: x86_64-unknown-linux-musl
+            binary: icarus-search
+            asset: icarus-search-linux-x64
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust target
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+          rustup target add ${{ matrix.target }}
+
+      - name: Install musl tools
+        if: contains(matrix.target, 'musl')
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+
+      - name: Test
+        # Tests run on the host; skip for the cross-compiled Intel Mac build.
+        if: matrix.target != 'x86_64-apple-darwin'
+        run: cargo test --locked
+
+      - name: Build
+        run: cargo build --release --locked --target ${{ matrix.target }}
+
+      - name: Stage asset
+        shell: bash
+        run: cp "target/${{ matrix.target }}/release/${{ matrix.binary }}" "${{ matrix.asset }}"
+
+      - name: Upload to release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1 \
+            || gh release create "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --generate-notes \
+            || true  # another matrix job created it first
+          gh release upload "$GITHUB_REF_NAME" "${{ matrix.asset }}" --clobber
